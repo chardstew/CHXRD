@@ -3,6 +3,34 @@ from tkinter import ttk
 import json
 import random
 
+# ── TOOLTIP HELPER ──────────────────────────────────────────────────────
+class Tooltip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text   = text
+        self.tipwin = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, event=None):
+        if self.tipwin:
+            return
+        x = event.x_root + 10
+        y = event.y_root + 10
+        self.tipwin = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(tw, text=self.text,
+                         background="black", foreground="white",
+                         font=("Fixedsys", 10), padx=4, pady=2)
+        label.pack()
+
+    def _hide(self, event=None):
+        if self.tipwin:
+            self.tipwin.destroy()
+            self.tipwin = None
+
+
 # ── LOAD CHORDS FROM FILE ───────────────────────────────────────────────
 with open("chords.json", "r") as f:
     CHORDS_RAW = json.load(f)
@@ -204,7 +232,26 @@ selected_path_label = tk.Label(root, text="", fg="white", bg="black", justify="l
 selected_path_label.grid(row=6, column=0, columnspan=3, pady=5)
 
 result_label = tk.Label(root, text="", fg="red", bg="black", justify="left")
-result_label.grid(row=7, column=0, columnspan=3, pady=10)
+result_label.grid(row=7, column=0, columnspan=5, pady=10)
+
+# ── CENTERED ★ BUTTONS IN A SUB‑FRAME ───────────────────────────────────
+stars_frame = tk.Frame(root, bg="black")
+stars_frame.grid(row=7, column=0, columnspan=5, pady=(0,10))
+
+add_star = tk.Button(stars_frame, text="☆", width=2, command=lambda: None,
+                     bg="black", fg="yellow")
+open_star = tk.Button(stars_frame, text="★", width=2, command=lambda: None,
+                     bg="black", fg="yellow")
+
+add_star.pack(side="left", padx=8)
+open_star.pack(side="left", padx=8)
+
+# ── ATTACH TOOLTIPS ─────────────────────────────────────────────────────
+Tooltip(mode_button,  "Toggle Basic/Scientific mode")
+Tooltip(reset_button, "Reset all selections")
+Tooltip(add_star,     "Add chord to favorites")
+Tooltip(open_star,    "Open favorites list")
+
 
 refresh_display()
 root.mainloop()
