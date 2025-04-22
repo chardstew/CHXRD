@@ -1,344 +1,177 @@
 import tkinter as tk
-from tkinter import ttk
 import json
-import random
-import time
-import mido
-from mido import Message
 
-# ── FILES & PERSISTENCE ───────────────────────────────────────────────
-FAV_FILE = 'favorites.json'
+# ── CONFIGURATION ───────────────────────────────────────────────
+JSON_FILE = 'chords_fulltext.json'
+FONT = 'Fixedsys 18'
+BG_COLOR = 'black'
+FG_COLOR = 'white'
+ACCENT_COLOR = 'red'
+SELECT_BG = '#550000'
+PAD_X = 14
+PAD_Y_TOP = 10
+PAD_Y_BOTTOM = 2
+BUTTON_WIDTH = 2  # clear dot width
+BUFFER_CHARS = 2  # extra character buffer for width
 
-def load_favorites():
-    try:
-        with open(FAV_FILE, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return []
+# ── ENHARMONIC MAP ────────────────────────────────────
+ENHARMONIC = {
+    'C':0,'B#':0,'C#':1,'Db':1,'D':2,'D#':3,'Eb':3,
+    'E':4,'Fb':4,'E#':5,'F':5,'F#':6,'Gb':6,
+    'G':7,'G#':8,'Ab':8,'A':9,'A#':10,'Bb':10,
+    'B':11,'Cb':11
+}
+PARSING_ROOTS = sorted(ENHARMONIC.keys(), key=lambda x: -len(x))
+DISPLAY_ROOTS = sorted(ENHARMONIC.keys(), key=lambda x: x.upper())
 
-def save_favorites():
-    with open(FAV_FILE, 'w') as f:
-        json.dump(favorites, f, indent=2)
+# ── LOAD & FLATTEN CHORDS ─────────────────────────────────
+with open(JSON_FILE, 'r') as f:
+    raw = json.load(f)
 
-favorites = load_favorites()
-
-# ── TOOLTIP HELPER ──────────────────────────────────────────────────────
-class Tooltip:
-    def __init__(self, widget, text):
-        self.widget = widget
-        self.text   = text
-        self.tipwin = None
-        widget.bind("<Enter>", self._show)
-        widget.bind("<Leave>", self._hide)
-
-    def _show(self, event=None):
-        if self.tipwin:
-            return
-        x = event.x_root + 10
-        y = event.y_root + 10
-        tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        label = tk.Label(tw, text=self.text,
-                         background="black", foreground="white",
-                         font=("Fixedsys", 10), padx=4, pady=2)
-        label.pack()
-        self.tipwin = tw
-
-    def _hide(self, event=None):
-        if self.tipwin:
-            self.tipwin.destroy()
-            self.tipwin = None
-
-# ── LOAD CHORDS FROM FILE ───────────────────────────────────────────────
-with open("chords.json", "r") as f:
-    CHORDS_RAW = json.load(f)
-CHORDS = {k: v[0] if isinstance(v, list) else v
-          for k, v in CHORDS_RAW.items() if isinstance(v, list)}
-
-INTERVALS = {
-    "1":0, "2":2, "2b":1, "2M":2,
-    "3b":3, "3":4,
-    "4":5, "5d":6, "5":7, "5A":8,
-    "6b":8, "6":9, "7b":10, "7":11,
-    "9b":13, "9":14, "9#":15,
-    "11b":16, "11":17, "11#":18,
-    "13b":20, "13":21
+CHORDS = {}
+NORMALIZE = {
+    '7b': 'b7', '13+4': '13', '13#4': '#13', '11#': '#11',
+    '9#': '#9', '13#': '#13', '#13': '#13', 'b13': 'b13'
 }
 
+def _flatten(x):
+    for item in x:
+        if isinstance(item, list):
+            yield from _flatten(item)
+        else:
+            yield str(item)
+
+for suffix, val in raw.items():
+    tokens = list(_flatten(val)) if isinstance(val, list) else str(val).split()
+    cleaned = []
+    for tok in tokens:
+        norm = NORMALIZE.get(tok, tok)
+        if norm not in cleaned:
+            cleaned.append(norm)
+    CHORDS[suffix] = ' '.join(cleaned)
+
+SUFFIXES = sorted(CHORDS.keys(), key=str.lower)
+OPTIONS = [f"{root}{suf}" for root in DISPLAY_ROOTS for suf in SUFFIXES]
+
+realistic_longest_example = "Formula: 1 3 5 b7 9 #11 13".ljust(40)
+TOTAL_CHARS = len(realistic_longest_example) + BUFFER_CHARS
+ENTRY_WIDTH = TOTAL_CHARS - BUTTON_WIDTH
+LIST_WIDTH = TOTAL_CHARS
+
+INTERVALS = {
+    '1':0,'2':2,'b2':1,'2b':1,'3b':3,'3':4,'4':5,
+    'b5':6,'5':7,'#5':8,'6':9,'b7':10,'7':11,
+    'b9':13,'9':14,'#9':15,'11':17,'#11':18,'b13':20,'13':21
+}
 NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-BASES = ["5","M","m"]
-QUALITIES = ["7","9","11","13"]
-EXTENSIONS = ["#11","b9","#9"]
 
-# ── STATE ──────────────────────────────────────────────────────────────
-selected_root = None
-selected_octave = None
-selected_base = None
-selected_quality = None
-selected_extension = None
-scientific_mode = False
+def get_midi(root, octave=4):
+    return 12*(octave+1) + ENHARMONIC[root]
 
-# ── MIDI OUTPUT ────────────────────────────────────────────────────────
-try:
-    port_name = mido.get_output_names()[0]
-    midi_port = mido.open_output(port_name)
-except Exception:
-    midi_port = None
-
-# ── CORE FUNCTIONS ─────────────────────────────────────────────────────
-def get_midi_number(note, octave):
-    return 12 * (octave + 1) + NOTE_NAMES.index(note)
-
-def parse_chord(root, octave, formula):
-    root_midi = get_midi_number(root, octave)
+def parse_chord(full):
+    full_up = full.upper()
+    root = next(r for r in PARSING_ROOTS if full_up.startswith(r.upper()))
+    suffix = full[len(root):]
+    formula = CHORDS.get(suffix, '')
     notes, names = [], []
-    for sym in formula.split():
-        val = INTERVALS.get(sym)
-        if val is not None:
-            midi_num = root_midi + val
-            notes.append(midi_num)
-            names.append(NOTE_NAMES[midi_num % 12])
-    return notes, names
+    base = get_midi(root)
+    seen = set()
+    for tok in formula.split():
+        val = INTERVALS.get(tok)
+        if val is not None and val not in seen:
+            seen.add(val)
+            midi = base + val
+            notes.append(str(midi))
+            names.append(NOTE_NAMES[midi % 12])
+    return root, suffix, formula, notes, names
 
-# ── FAVORITES ACTIONS ──────────────────────────────────────────────────
-def add_favorite():
-    if not (selected_root and selected_octave is not None):
-        return
-    key_parts = [selected_base or '', selected_quality or '', selected_extension or '']
-    chord_key = ''.join(p for p in key_parts if p)
-    fav = {
-        'root': selected_root,
-        'octave': selected_octave,
-        'base': selected_base,
-        'quality': selected_quality,
-        'extension': selected_extension
-    }
-    if fav not in favorites:
-        favorites.append(fav)
-        save_favorites()
-
-def open_favorites_popup():
-    win = tk.Toplevel(root)
-    win.title("Favorites")
-    for fav in favorites:
-        text = f"{fav['root']}{fav['octave']} {fav['base'] or ''}{fav['quality'] or ''}{fav['extension'] or ''}".strip()
-        btn = tk.Button(win, text=text,
-                        command=lambda f=fav: apply_favorite(f),
-                        bg="black", fg="red", activebackground="#330000", activeforeground="white")
-        btn.pack(fill='x', padx=5, pady=2)
-
-def apply_favorite(fav):
-    set_root(fav['root'])
-    set_octave(fav['octave'])
-    if fav['base']: set_base(fav['base'])
-    if fav['quality']: set_quality(fav['quality'])
-    if fav['extension']: set_extension(fav['extension'])
-
-# ── PLAYBACK ───────────────────────────────────────────────────────────
-def play_chord():
-    bpm = 120
-    try:
-        bpm = int(bpm_entry.get())
-    except ValueError:
-        pass
-    chord_key = ''.join(p for p in [selected_base or '', selected_quality or '', selected_extension or ''] if p)
-    if not (selected_root and selected_octave is not None):
-        return
-    if not (scientific_mode or chord_key in CHORDS):
-        return
-    formula = (CHORDS.get(chord_key)
-               if not scientific_mode else build_scientific(chord_key))
-    midi_notes, _ = parse_chord(selected_root, selected_octave, formula)
-    if midi_port:
-        dur = 60.0 / bpm
-        for n in midi_notes:
-            midi_port.send(Message('note_on', note=n, velocity=64))
-        time.sleep(dur)
-        for n in midi_notes:
-            midi_port.send(Message('note_off', note=n, velocity=64))
-
-def build_scientific(chord_key):
-    parts = []
-    if selected_base == 'M': parts += ['1','3','5']
-    elif selected_base == 'm': parts += ['1','3b','5']
-    elif selected_base == '5': parts += ['1','5']
-    if selected_quality: parts.append(selected_quality)
-    if selected_extension: parts.append(selected_extension)
-    return ' '.join(parts)
-
-# ── UI ACTIONS ─────────────────────────────────────────────────────────
-def set_root(note):
-    global selected_root
-    selected_root = note
-    refresh_display()
-
-def set_octave(oct):
-    global selected_octave
-    selected_octave = oct
-    refresh_display()
-
-def set_base(b):
-    global selected_base, selected_quality, selected_extension
-    selected_base = b
-    selected_quality = None
-    selected_extension = None
-    refresh_display()
-
-def set_quality(q):
-    global selected_quality
-    selected_quality = q
-    selected_extension = None
-    refresh_display()
-
-def set_extension(e):
-    global selected_extension
-    selected_extension = e
-    refresh_display()
-
-def toggle_mode():
-    global scientific_mode
-    scientific_mode = not scientific_mode
-    indicator.config(bg="#ff0000" if scientific_mode else "#550000")
-    refresh_display()
-
-def reset_all():
-    global selected_root, selected_octave, selected_base, selected_quality, selected_extension
-    selected_root = None
-    selected_octave = None
-    selected_base = None
-    selected_quality = None
-    selected_extension = None
-    refresh_display()
-
-# ── DISPLAY REFRESH ────────────────────────────────────────────────────
-def refresh_display():
-    # enable/disable grids
-    for child in root_grid.winfo_children():
-        if isinstance(child, tk.Button): child.config(state="normal")
-    for child in oct_grid.winfo_children():
-        child.config(state="normal" if selected_root else "disabled")
-    for widget in base_frame.winfo_children():
-        widget.config(state="normal" if selected_octave is not None else "disabled")
-    for widget in quality_frame.winfo_children():
-        widget.config(state="normal" if selected_base else "disabled")
-    for widget in extension_frame.winfo_children():
-        widget.config(state="normal" if selected_quality else "disabled")
-    # highlight selections
-    for widget in base_frame.winfo_children():
-        widget.config(relief="sunken" if widget.cget('text')==selected_base else 'raised')
-    for widget in quality_frame.winfo_children():
-        widget.config(relief="sunken" if widget.cget('text')==selected_quality else 'raised')
-    for widget in extension_frame.winfo_children():
-        widget.config(relief="sunken" if widget.cget('text')==selected_extension else 'raised')
-    # path label
-    parts = [selected_base, selected_quality, selected_extension]
-    chord_key = ''.join(p for p in parts if p)
-    selected_path_label.config(
-        text=f"Root: {selected_root or '-'}  Octave: {selected_octave if selected_octave is not None else '-'}\n"
-             f"Chord Type: {chord_key or '-'}  Mode: {'Scientific' if scientific_mode else 'Basic'}")
-    # result
-    if selected_root and selected_octave is not None and (scientific_mode or chord_key in CHORDS):
-        formula = (CHORDS.get(chord_key)
-                   if not scientific_mode else build_scientific(chord_key))
-        midi_notes, note_names = parse_chord(selected_root, selected_octave, formula)
-        sci_names = [f"{NOTE_NAMES[n%12]}{n//12-1}" for n in midi_notes]
-        result_label.config(
-            text=f"Formula: {formula}\n"
-                 f"MIDI Notes: {' '.join(map(str,midi_notes))}\n"
-                 f"Note Names: {' '.join(note_names)}\n"
-                 f"Scientific: {' '.join(sci_names)}")
-    else:
-        result_label.config(text="")
-
-# ── BUILD UI ────────────────────────────────────────────────────────────
 root = tk.Tk()
-root.title("CHXRD Chord Explorer")
-root.configure(bg="black")
-root.option_add("*Font","Fixedsys 14")
+root.title('CHXRD')
+root.configure(bg=BG_COLOR)
+root.option_add('*Font', FONT)
+root.resizable(False, False)
 
-indicator = tk.Label(root, text="", width=2, height=1, bg="#550000")
-indicator.grid(row=0, column=0, padx=5, pady=5)
-mode_button = tk.Button(root, text="CHXRD Mode", command=toggle_mode,
-                        bg="black", fg="red", activebackground="#330000", activeforeground="white")
-mode_button.grid(row=0, column=1, padx=5, pady=5)
-reset_button = tk.Button(root, text="Reset", command=reset_all,
-                         bg="black", fg="red", activebackground="#330000", activeforeground="white")
-reset_button.grid(row=0, column=2, padx=5, pady=5)
+input_frame = tk.Frame(root, bg=BG_COLOR)
+input_frame.pack(padx=PAD_X, pady=(PAD_Y_TOP, PAD_Y_BOTTOM), anchor='w')
 
-# root notes
-root_grid = tk.Frame(root, bg="black")
-root_grid.grid(row=1, column=0, columnspan=3, pady=5)
-for i,n in enumerate(NOTE_NAMES):
-    r,c = (0,i) if i<6 else (1,i-6)
-    btn = tk.Button(root_grid, text=n, width=4, command=lambda x=n: set_root(x),
-                    bg="black", fg="red", activebackground="#550000", activeforeground="white")
-    btn.grid(row=r, column=c, padx=2, pady=2)
+entry_var = tk.StringVar()
+entry = tk.Entry(
+    input_frame, textvariable=entry_var,
+    bg=BG_COLOR, fg=FG_COLOR,
+    insertbackground=FG_COLOR,
+    insertwidth=4, width=ENTRY_WIDTH)
+entry.pack(side='left')
+entry.focus_set()
 
-# octave
-oct_grid = tk.Frame(root, bg="black")
-oct_grid.grid(row=2, column=0, columnspan=3, pady=5)
-for i in range(10):
-    btn = tk.Button(oct_grid, text=str(i), width=4, command=lambda x=i: set_octave(x),
-                    bg="black", fg="red", activebackground="#550000", activeforeground="white")
-    btn.grid(row=i//5, column=i%5, padx=2, pady=2)
+btn_clear = tk.Button(
+    input_frame, text='\u25cf', width=BUTTON_WIDTH,
+    command=lambda: (entry_var.set(''), entry.focus_set(), update_list()),
+    bg=BG_COLOR, fg=ACCENT_COLOR,
+    relief='flat', bd=0)
+btn_clear.pack(side='left', padx=(4,0))
 
-# bases
-base_frame = tk.Frame(root, bg="black")
-base_frame.grid(row=3, column=0, columnspan=3, pady=5)
-for b in BASES:
-    btn = tk.Button(base_frame, text=b, width=4, command=lambda x=b: set_base(x),
-                    bg="black", fg="red", activebackground="#330000", activeforeground="white")
-    btn.pack(side='left', padx=2, pady=2)
+listbox = tk.Listbox(
+    root, bg=BG_COLOR, fg=ACCENT_COLOR,
+    selectbackground=SELECT_BG,
+    width=LIST_WIDTH, height=7,
+    exportselection=False)
+listbox.pack(padx=PAD_X, pady=(0, PAD_Y_BOTTOM))
 
-# qualities
-quality_frame = tk.Frame(root, bg="black")
-quality_frame.grid(row=4, column=0, columnspan=3, pady=5)
-for q in QUALITIES:
-    btn = tk.Button(quality_frame, text=q, width=4, command=lambda x=q: set_quality(x),
-                    bg="black", fg="red", activebackground="#330000", activeforeground="white")
-    btn.pack(side='left', padx=2, pady=2)
+labels = []
+for text in ['Chord:', 'Formula:', 'MIDI:', 'Names:']:
+    lbl = tk.Label(root, text=f'{text} ', fg=FG_COLOR, bg=BG_COLOR, anchor='w')
+    lbl.pack(padx=PAD_X, anchor='w', pady=(0,2))
+    labels.append(lbl)
+chord_label, formula_label, midi_label, names_label = labels
 
-# extensions
-extension_frame = tk.Frame(root, bg="black")
-extension_frame.grid(row=5, column=0, columnspan=3, pady=5)
-for e in EXTENSIONS:
-    btn = tk.Button(extension_frame, text=e, width=4, command=lambda x=e: set_extension(x),
-                    bg="black", fg="red", activebackground="#330000", activeforeground="white")
-    btn.pack(side='left', padx=2, pady=2)
+def update_list(event=None):
+    txt = entry_var.get().strip().lower()
+    listbox.delete(0, tk.END)
+    if not txt:
+        for lbl in labels:
+            lbl.config(text=lbl.cget('text').split(':')[0] + ': ')
+        return
+    matches = [opt for opt in OPTIONS if opt.lower().startswith(txt)]
+    for opt in matches:
+        listbox.insert(tk.END, opt)
+    if matches and matches[0].lower() == txt:
+        listbox.selection_set(0)
+        listbox.activate(0)
+        listbox.see(0)
+        show_selection()
 
-# status & stars
-selected_path_label = tk.Label(root, text="", fg="white", bg="black", justify='left')
-selected_path_label.grid(row=6, column=0, columnspan=3, pady=5)
-result_label = tk.Label(root, text="", fg="red", bg="black", justify='left')
-result_label.grid(row=7, column=0, columnspan=5, pady=5)
-stars_frame = tk.Frame(root, bg="black")
-stars_frame.grid(row=8, column=0, columnspan=5, pady=(0,10))
-add_star = tk.Button(stars_frame, text="☆", width=2, command=add_favorite,
-                    bg="black", fg="yellow")
-open_star = tk.Button(stars_frame, text="★", width=2, command=open_favorites_popup,
-                     bg="black", fg="yellow")
-add_star.pack(side='left', padx=8)
-open_star.pack(side='left', padx=8)
+def on_key(event):
+    if event.keysym in ('Down', 'Up') and listbox.size():
+        idx = listbox.curselection()[0] if listbox.curselection() else -1
+        new = {'Down': min(listbox.size()-1, idx+1), 'Up': max(0, idx-1)}[event.keysym]
+        listbox.selection_clear(0, tk.END)
+        listbox.selection_set(new)
+        listbox.activate(new)
+        listbox.see(new)
+        show_selection()
+        listbox.focus_set()
+        return 'break'
 
-# playback controls
-control_frame = tk.Frame(root, bg='black')
-control_frame.grid(row=9, column=0, columnspan=5, pady=5)
-BPM_label = tk.Label(control_frame, text='BPM:', fg='white', bg='black')
-BPM_label.pack(side='left')
-bpm_entry = tk.Entry(control_frame, width=4)
-bpm_entry.insert(0, '120')
-bpm_entry.pack(side='left', padx=(0,10))
-play_button = tk.Button(control_frame, text='Play Chord', command=play_chord,
-                        bg='black', fg='red', activebackground='#330000', activeforeground='white')
-play_button.pack(side='left')
+def show_selection(event=None):
+    if not listbox.curselection():
+        return
+    sel = listbox.get(listbox.curselection()[0])
+    root_n, suf, formula, notes, names = parse_chord(sel)
+    chord_label.config(text=f'Chord: {sel}')
+    formula_label.config(text=f'Formula: {formula}')
+    midi_label.config(text=f"MIDI: {' '.join(notes)}")
+    names_label.config(text=f"Names: {' '.join(names)}")
 
-# tooltips
-Tooltip(mode_button,   "Toggle Basic/Scientific mode")
-Tooltip(reset_button,  "Reset all selections")
-Tooltip(add_star,      "Add chord to favorites")
-Tooltip(open_star,     "Open favorites list")
-Tooltip(play_button,   "Play the current chord at given BPM")
+entry.bind('<KeyRelease>', update_list)
+entry.bind('<Down>', on_key)
+entry.bind('<Up>', on_key)
+listbox.bind('<<ListboxSelect>>', show_selection)
 
-refresh_display()
+def freeze():
+    root.update_idletasks()
+    w = root.winfo_width()
+    h = root.winfo_height()
+    root.geometry(f"{w}x{h}")
+root.after(100, freeze)
 root.mainloop()
+
